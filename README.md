@@ -1,1 +1,2 @@
-# FLEX (Fast simuLation based on tEnsorflow for Xenon)
+# FLEX
+Fast simuLation based on tEnsorflow for Xenon.
