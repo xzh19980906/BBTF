@@ -7,7 +7,7 @@ class KNN():
         values : tensor-like with shape (N,), as the values at reference points
         k      : int, as the number of the nearest neighbors
         
-        The algorithm is the same as the one in straxen https://github.com/XENONnT/straxen/blob/a8402c46053105ad5c60b38ae91ef9b8a1571aa7/straxen/itp_map.py#L15.
+        The algorithm is the same as the one in straxen (https://github.com/XENONnT/straxen/blob/a8402c46053105ad5c60b38ae91ef9b8a1571aa7/straxen/itp_map.py#L15).
         """
         self.ref_points = tf.convert_to_tensor(points, dtype=tf.float32)
         self.ref_values = tf.convert_to_tensor(values, dtype=tf.float32)
@@ -38,9 +38,68 @@ class KNN():
         """
         points = tf.convert_to_tensor(points, dtype=tf.float32)
         
-        dr2 = - self.L2_dist2(points, self.ref_points) # (num_pts, num_ref)
-        dr2, ind = tf.math.top_k(dr2, self.k) # (num_pts, k)
-        weights = 1.0 / tf.clip_by_value(tf.sqrt(-dr2), 1e-6, float('inf')) # (num_pts, k)
-        vals = tf.gather(self.ref_values, ind) # (num_pts, k)
-        vals = tf.math.reduce_sum(vals * weights, axis=1) / tf.math.reduce_sum(weights, axis=1)  # (num_pts, )
+        dr2 = - self.L2_dist2(points, self.ref_points)
+        dr2, ind = tf.math.top_k(dr2, self.k)
+        weights = 1.0 / tf.clip_by_value(tf.sqrt(-dr2), 1e-6, float('inf'))
+        vals = tf.gather(self.ref_values, ind)
+        vals = tf.math.reduce_sum(vals * weights, axis=1) / tf.math.reduce_sum(weights, axis=1)
+        return vals
+    
+    
+class NN_LinearGrid():
+    def __init__(self, values, binning):
+        """
+        values  : tensor-like with shape (ax1_n_bin, ..., axD_n_bin)
+        binning : [
+            [ax1_lower, ax1_upper, ax1_n_bin], 
+            ...,
+            [axD_lower, axD_upper, axD_n_bin], 
+            ]
+            
+        The algorithm is the same as the one in straxen with k=2^dim (https://github.com/XENONnT/straxen/blob/a8402c46053105ad5c60b38ae91ef9b8a1571aa7/straxen/itp_map.py#L15).
+        """
+        self.ref_values = tf.convert_to_tensor(values, dtype=tf.float32)
+        self.binning = binning
+        self.dim = len(binning)
+        
+        self.lowers = tf.constant([axis[0] for axis in binning], dtype=tf.float32)
+        self.stepsize = tf.constant([(axis[1]-axis[0])/(axis[2]-1) for axis in binning], dtype=tf.float32)
+        self.num_bins = tf.constant([(axis[2]-1) for axis in binning], dtype=tf.int32)
+        self.lowers = tf.reshape(self.lowers, (1, 1, self.dim))
+        self.stepsize = tf.reshape(self.stepsize, (1, 1, self.dim))
+        self.num_bins = tf.reshape(self.num_bins, (1, 1, self.dim))
+        
+        self._magic_ind_shift = tf.transpose(tf.constant([([1]*(2**i)+[0]*(2**i))*(2**(self.dim-i-1)) for i in range(self.dim)], dtype=tf.int32))
+        self._magic_ind_shift = tf.expand_dims(self._magic_ind_shift, axis=1)
+        
+        assert len(binning) == len(tf.shape(values)), "binning (%i-D) must have the same dimension as values (%i-D)!"%(len(binning), len(tf.shape(values)))
+        assert tf.reduce_all(tf.shape(values) == [axis[2] for axis in binning]), "values shape is not consistent with binning!"
+    
+    def __call__(self, *args, **kwargs):
+        return self.interp(*args, **kwargs)
+    
+    def _get_nn_indices(self, points):
+        """
+        points : point positions with shape (1, N, D)
+        
+        return : 2^D nearest neighbor indices with shape (2^D, N, D)
+        """
+        ind = tf.clip_by_value(tf.cast((points - self.lowers) / self.stepsize, tf.int32), 0, self.num_bins-1)
+        return ind + self._magic_ind_shift
+    
+    def interp(self, points):
+        """
+        points : tensor-like with shape (N, D), as the points to be interpolated.
+        
+        return : interpolated values at the points with shape (N,), weighted by the inverse of distance to 2^D nearest neighbors. 
+        """
+        points = tf.convert_to_tensor(points, dtype=tf.float32)
+        
+        points = tf.expand_dims(points, axis=0)
+        ind = self._get_nn_indices(points)
+        ref_pos = self.lowers + self.stepsize * tf.cast(ind, tf.float32)
+        dr2 = tf.reduce_sum(tf.square(points - ref_pos), axis=-1)
+        weights = 1. / tf.clip_by_value(tf.sqrt(dr2), 1e-6, float('inf'))
+        vals = tf.gather_nd(self.ref_values, ind)
+        vals = tf.math.reduce_sum(vals * weights, axis=0) / tf.math.reduce_sum(weights, axis=0)
         return vals
